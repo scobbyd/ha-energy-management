@@ -1,0 +1,34 @@
+# Energy Package - EPEX Price Predictor
+# LightGBM-based EPEX day-ahead price predictions from EpexPredictor (b3nn0)
+# Free public API, no key required. 15-min resolution, 120 hours ahead.
+#
+# Source: https://github.com/b3nn0/EpexPredictor
+# API: https://epexpredictor.batzill.com/prices_short
+# Model: LightGBM gradient boosting + Open-Meteo weather + ENTSO-E grid data
+# Accuracy: ~1.6 ct/kWh MAE for NL (1-day ahead)
+#
+# Dependencies:
+# - Internet access to epexpredictor.batzill.com
+#
+# Entities:
+# - sensor.epex_predictor_nl : Current predicted price + forecast attribute with 120h of predictions
+
+command_line:
+  - sensor:
+      name: "EPEX Predictor NL"
+      unique_id: epex_predictor_nl
+      command: >
+        curl -s 'https://epexpredictor.batzill.com/prices_short?region=NL&surcharge=0&taxPercent=0&unit=EUR_PER_KWH&hours=120' |
+        python3 -c "import sys,json;
+        from datetime import datetime,timezone;
+        d=json.load(sys.stdin);
+        ts=d.get('s',[]);pr=d.get('t',[]);
+        now=int(datetime.now(timezone.utc).timestamp());
+        fc=[{'datetime':datetime.fromtimestamp(t,tz=timezone.utc).isoformat(),'value':round(p,5)} for t,p in zip(ts,pr)];
+        cur=next((p for t,p in zip(ts,pr) if abs(t-now)<900),pr[0] if pr else 0);
+        print(json.dumps({'state':round(cur,5),'forecast':fc}))"
+      scan_interval: 900
+      value_template: "{{ value_json.state | default('unavailable') }}"
+      unit_of_measurement: "EUR/kWh"
+      json_attributes:
+        - forecast

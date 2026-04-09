@@ -1,0 +1,444 @@
+# Energy Package - EMS State Machine
+# Ideal state computation, transition logic, and state entry actions.
+#
+# Architecture:
+#   sensor.ems_ideal_state    — what state prices currently warrant
+#   sensor.ems_transition_spread — how far past threshold (ct/kWh)
+#   script.ems_apply_state    — sets all control levers for a state
+#   automation: price evaluator — manages parallel timers
+#   automation: timer handlers  — execute transitions when timers complete
+#
+# Price sensors report EUR/MWh. Helpers use ct/kWh. Conversion: ct = EUR/MWh ÷ 10.
+# Fee helper (provider_fee) is in EUR/MWh to avoid double conversion.
+
+template:
+  - sensor:
+      - name: "EMS Ideal State"
+        unique_id: ems_ideal_state
+        icon: mdi:state-machine
+        state: >
+          {% set sell = states('sensor.tennet_imbalance_sell_price') | float(0) %}
+          {% set buy = states('sensor.tennet_imbalance_buy_price') | float(0) %}
+          {% set fee = states('input_number.provider_fee') | float(20) %}
+          {% set profit_ct = states('input_number.dumpload_profit_threshold') | float(7) %}
+          {# profit_ct (ct/kWh) × 10 = EUR/MWh, same unit as fee #}
+          {% set dump_threshold = -(profit_ct * 10 + fee) %}
+          {% set soc = states('sensor.inverter_battery') | float(0) %}
+          {% set soc_entry = states('input_number.dump_soc_entry') | float(70) %}
+          {% set sell_avg = states('sensor.tennet_sell_price_24h_average') | float(0) %}
+          {% set spike_spread_eur = states('input_number.sell_spike_spread') | float(30) * 10 %}
+          {% set spike_floor_eur = states('input_number.sell_spike_floor') | float(40) * 10 %}
+          {% set pv_power = states('sensor.inverter_pv_power') | float(0) %}
+          {% set sell_enabled = is_state('input_boolean.ems_sell_enabled', 'on') %}
+          {% set grid_use_enabled = is_state('input_boolean.ems_grid_use_enabled', 'on') %}
+          {% set dump_enabled = is_state('input_boolean.ems_dump_enabled', 'on') %}
+          {# Priority: SELL > DUMP > GRID_USE > SELF_CONSUME > NORMAL #}
+          {% if sell > (sell_avg + spike_spread_eur) and sell > spike_floor_eur and pv_power > 3000 and sell_enabled %}
+            SELL
+          {% elif buy < dump_threshold and soc > soc_entry and is_state('input_boolean.ems_dumpload_connected', 'on') and dump_enabled %}
+            DUMP
+          {% elif buy < -fee and grid_use_enabled %}
+            GRID_USE
+          {% elif sell < fee %}
+            SELF_CONSUME
+          {% else %}
+            NORMAL
+          {% endif %}
+        availability: >
+          {{ states('sensor.tennet_imbalance_sell_price') not in ['unavailable', 'unknown']
+             and states('sensor.tennet_imbalance_buy_price') not in ['unavailable', 'unknown'] }}
+
+      - name: "EMS Transition Spread"
+        unique_id: ems_transition_spread
+        icon: mdi:arrow-expand-horizontal
+        unit_of_measurement: "ct"
+        state: >
+          {% set current = states('input_select.ems_state') %}
+          {% set ideal = states('sensor.ems_ideal_state') %}
+          {% if ideal in ['unavailable', 'unknown'] or current == ideal %}
+            0
+          {% else %}
+            {% set sell = states('sensor.tennet_imbalance_sell_price') | float(0) %}
+            {% set buy = states('sensor.tennet_imbalance_buy_price') | float(0) %}
+            {% set fee = states('input_number.provider_fee') | float(20) %}
+            {% set profit_ct = states('input_number.dumpload_profit_threshold') | float(7) %}
+            {% set profit_eur = profit_ct * 10 %}
+            {# Spread = distance past the threshold separating current from ideal.
+               Branch order matters — check specific cases before general. #}
+            {% if current == 'SELL' %}
+              {# Exiting SELL: sell dropping below spike threshold #}
+              {% set sell_avg = states('sensor.tennet_sell_price_24h_average') | float(0) %}
+              {% set spike_spread_eur = states('input_number.sell_spike_spread') | float(30) * 10 %}
+              {% set spike_threshold = sell_avg + spike_spread_eur %}
+              {{ ((spike_threshold - sell) / 10) | round(2) }}
+            {% elif ideal == 'SELL' %}
+              {# Entering SELL: sell rising above spike threshold #}
+              {% set sell_avg = states('sensor.tennet_sell_price_24h_average') | float(0) %}
+              {% set spike_spread_eur = states('input_number.sell_spike_spread') | float(30) * 10 %}
+              {% set spike_threshold = sell_avg + spike_spread_eur %}
+              {{ ((sell - spike_threshold) / 10) | round(2) }}
+            {% elif current == 'DUMP' %}
+              {# Exiting DUMP: always measure from DUMP threshold #}
+              {% set threshold = -(profit_eur + fee) %}
+              {{ ((buy - threshold) / 10) | round(2) }}
+            {% elif current == 'GRID_USE' and ideal in ['NORMAL', 'SELF_CONSUME'] %}
+              {# Exiting GRID_USE upward: measure from GRID_USE threshold #}
+              {{ ((buy - (-fee)) / 10) | round(2) }}
+            {% elif current == 'GRID_USE' and ideal == 'DUMP' %}
+              {# Deepening GRID_USE → DUMP: measure from DUMP threshold #}
+              {% set threshold = -(profit_eur + fee) %}
+              {{ ((threshold - buy) / 10) | round(2) }}
+            {% elif ideal in ['GRID_USE', 'DUMP'] %}
+              {# Entering buy-driven from NORMAL/SELF_CONSUME #}
+              {% set threshold = -(profit_eur + fee) if ideal == 'DUMP' else -fee %}
+              {{ ((threshold - buy) / 10) | round(2) }}
+            {% else %}
+              {# Sell-driven: NORMAL ↔ SELF_CONSUME #}
+              {% if ideal == 'NORMAL' %}
+                {{ ((sell - fee) / 10) | round(2) }}
+              {% else %}
+                {{ ((fee - sell) / 10) | round(2) }}
+              {% endif %}
+            {% endif %}
+          {% endif %}
+        availability: >
+          {{ states('sensor.ems_ideal_state') not in ['unavailable', 'unknown'] }}
+
+  - binary_sensor:
+      - name: "EMS Dumpload Active"
+        unique_id: ems_dumpload_active
+        icon: mdi:radiator
+        device_class: running
+        state: "{{ is_state('input_select.ems_state', 'DUMP') }}"
+
+script:
+  ems_apply_state:
+    alias: "EMS - Apply State"
+    description: "Set all inverter control levers for the target EMS state"
+    fields:
+      state:
+        description: "Target state: NORMAL, SELF_CONSUME, GRID_USE, DUMP"
+        example: "NORMAL"
+    sequence:
+      # Update state tracker
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.ems_state
+        data:
+          option: "{{ state }}"
+      # Cancel Soft Fuse hold (load profile changed)
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ems_soft_fuse_hold_until
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      # Cancel transition timers
+      - action: timer.cancel
+        target:
+          entity_id:
+            - timer.ems_slow
+            - timer.ems_fast
+      # Apply controls per state
+      - choose:
+          # --- SELL ---
+          - conditions: "{{ state == 'SELL' }}"
+            sequence:
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_pv_power
+                data:
+                  value: 13000
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_battery_max_discharging_current
+                data:
+                  value: 240
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_battery_max_charging_current
+                data:
+                  value: 0
+              - action: switch.turn_off
+                target:
+                  entity_id: switch.inverter_battery_grid_charging
+              - action: switch.turn_on
+                target:
+                  entity_id: switch.inverter_export_surplus
+              - action: select.select_option
+                target:
+                  entity_id: select.inverter_io_mode
+                data:
+                  option: "Generator"
+          # --- NORMAL ---
+          - conditions: "{{ state == 'NORMAL' }}"
+            sequence:
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_pv_power
+                data:
+                  value: 13000
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_battery_max_discharging_current
+                data:
+                  value: 240
+              - action: switch.turn_off
+                target:
+                  entity_id: switch.inverter_battery_grid_charging
+              - action: switch.turn_on
+                target:
+                  entity_id: switch.inverter_export_surplus
+              - action: select.select_option
+                target:
+                  entity_id: select.inverter_io_mode
+                data:
+                  option: "Generator"
+          # --- SELF_CONSUME ---
+          - conditions: "{{ state == 'SELF_CONSUME' }}"
+            sequence:
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_pv_power
+                data:
+                  value: 13000
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_battery_max_discharging_current
+                data:
+                  value: 240
+              - action: switch.turn_off
+                target:
+                  entity_id: switch.inverter_battery_grid_charging
+              - action: switch.turn_off
+                target:
+                  entity_id: switch.inverter_export_surplus
+              - action: select.select_option
+                target:
+                  entity_id: select.inverter_io_mode
+                data:
+                  option: "Generator"
+          # --- GRID_USE ---
+          - conditions: "{{ state == 'GRID_USE' }}"
+            sequence:
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_pv_power
+                data:
+                  value: 400
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_battery_max_discharging_current
+                data:
+                  value: 0
+              - action: switch.turn_off
+                target:
+                  entity_id: switch.inverter_export_surplus
+              - action: select.select_option
+                target:
+                  entity_id: select.inverter_io_mode
+                data:
+                  option: "Generator"
+          # --- DUMP ---
+          - conditions: "{{ state == 'DUMP' }}"
+            sequence:
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_pv_power
+                data:
+                  value: 400
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_battery_max_discharging_current
+                data:
+                  value: 0
+              - action: switch.turn_off
+                target:
+                  entity_id: switch.inverter_export_surplus
+              - action: select.select_option
+                target:
+                  entity_id: select.inverter_io_mode
+                data:
+                  option: "SmartLoad"
+      # Log transition
+      - action: system_log.write
+        data:
+          message: >
+            EMS → {{ state }} |
+            sell={{ states('sensor.tennet_imbalance_sell_price') }} EUR/MWh,
+            buy={{ states('sensor.tennet_imbalance_buy_price') }} EUR/MWh,
+            SOC={{ states('sensor.inverter_battery') }}%
+          level: info
+          logger: homeassistant.energy.ems
+
+automation:
+  # --- Price Evaluator: manages parallel timers based on spread ---
+  - id: ems_price_evaluator
+    alias: "Energy - EMS - Price Evaluator"
+    description: "Evaluate prices on change, manage SLOW/FAST/INSTANT timers"
+    trigger:
+      - platform: state
+        entity_id:
+          - sensor.tennet_imbalance_sell_price
+          - sensor.tennet_imbalance_buy_price
+      - platform: state
+        entity_id: sensor.inverter_battery
+    condition:
+      - condition: template
+        value_template: >
+          {{ states('sensor.ems_ideal_state') not in ['unavailable', 'unknown'] }}
+    action:
+      - variables:
+          ideal: "{{ states('sensor.ems_ideal_state') }}"
+          current: "{{ states('input_select.ems_state') }}"
+          spread_ct: "{{ states('sensor.ems_transition_spread') | float(0) }}"
+          hysteresis: "{{ states('input_number.transition_hysteresis') | float(2) }}"
+          fast_spread: "{{ states('input_number.transition_fast_spread') | float(4) }}"
+          instant_spread: "{{ states('input_number.transition_instant_spread') | float(15) }}"
+          slow_secs: "{{ (states('input_number.transition_slow_duration') | float(5) * 60) | int }}"
+          fast_secs: "{{ (states('input_number.transition_fast_duration') | float(1) * 60) | int }}"
+      - choose:
+          # No transition needed — cancel all timers
+          - conditions: "{{ ideal == current }}"
+            sequence:
+              - action: timer.cancel
+                target:
+                  entity_id:
+                    - timer.ems_slow
+                    - timer.ems_fast
+
+          # SELL — always instant, no timers. Entry conditions ARE the filter.
+          - conditions: "{{ ideal == 'SELL' or current == 'SELL' }}"
+            sequence:
+              - action: timer.cancel
+                target:
+                  entity_id:
+                    - timer.ems_slow
+                    - timer.ems_fast
+              - action: script.ems_apply_state
+                data:
+                  state: "{{ ideal }}"
+
+          # INSTANT override — transition immediately
+          - conditions: "{{ spread_ct >= instant_spread }}"
+            sequence:
+              - action: timer.cancel
+                target:
+                  entity_id:
+                    - timer.ems_slow
+                    - timer.ems_fast
+              - action: script.ems_apply_state
+                data:
+                  state: "{{ ideal }}"
+
+          # Below hysteresis — cancel all timers
+          - conditions: "{{ spread_ct < hysteresis }}"
+            sequence:
+              - action: timer.cancel
+                target:
+                  entity_id:
+                    - timer.ems_slow
+                    - timer.ems_fast
+
+        # Default: spread >= hysteresis but < instant — manage timers
+        default:
+          # Start SLOW if idle
+          - if:
+              - condition: template
+                value_template: "{{ is_state('timer.ems_slow', 'idle') }}"
+            then:
+              - action: timer.start
+                target:
+                  entity_id: timer.ems_slow
+                data:
+                  duration: "{{ slow_secs }}"
+          # FAST timer management
+          - if:
+              - condition: template
+                value_template: "{{ spread_ct >= fast_spread and is_state('timer.ems_fast', 'idle') }}"
+            then:
+              - action: timer.start
+                target:
+                  entity_id: timer.ems_fast
+                data:
+                  duration: "{{ fast_secs }}"
+          - if:
+              - condition: template
+                value_template: "{{ spread_ct < fast_spread and is_state('timer.ems_fast', 'active') }}"
+            then:
+              - action: timer.cancel
+                target:
+                  entity_id: timer.ems_fast
+
+  # --- Timer Completion: execute transition when a timer fires ---
+  - id: ems_timer_completed
+    alias: "Energy - EMS - Timer Completed"
+    description: "Transition to ideal state when SLOW or FAST timer completes"
+    trigger:
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.ems_slow
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.ems_fast
+    condition:
+      # Only transition if ideal still differs from current
+      - condition: template
+        value_template: >
+          {{ states('sensor.ems_ideal_state') != states('input_select.ems_state')
+             and states('sensor.ems_ideal_state') not in ['unavailable', 'unknown'] }}
+    action:
+      - action: script.ems_apply_state
+        data:
+          state: "{{ states('sensor.ems_ideal_state') }}"
+
+  # --- SOC Fallback: immediate DUMP exit when battery low ---
+  - id: ems_soc_fallback
+    alias: "Energy - EMS - SOC Fallback"
+    description: "Exit DUMP immediately if battery SOC drops below fallback threshold"
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.inverter_battery
+        below: input_number.dump_soc_fallback
+    condition:
+      - condition: state
+        entity_id: input_select.ems_state
+        state: "DUMP"
+    action:
+      - action: script.ems_apply_state
+        data:
+          state: "GRID_USE"
+      - action: system_log.write
+        data:
+          message: >
+            EMS: SOC fallback triggered ({{ states('sensor.inverter_battery') }}%
+            < {{ states('input_number.dump_soc_fallback') }}%). DUMP → GRID_USE.
+          level: warning
+          logger: homeassistant.energy.ems
+
+  # --- HA Restart: re-evaluate state on boot ---
+  - id: ems_startup
+    alias: "Energy - EMS - Startup Re-evaluate"
+    description: "On HA restart, wait for sensors then evaluate state"
+    trigger:
+      - platform: homeassistant
+        event: start
+    action:
+      - delay: "00:02:00"
+      - condition: template
+        value_template: >
+          {{ states('sensor.ems_ideal_state') not in ['unavailable', 'unknown'] }}
+      - action: script.ems_apply_state
+        data:
+          state: "{{ states('sensor.ems_ideal_state') }}"
+
+sensor:
+  - platform: statistics
+    name: "TenneT Sell Price 24h Average"
+    unique_id: tennet_sell_price_24h_average
+    entity_id: sensor.tennet_imbalance_sell_price
+    state_characteristic: mean
+    max_age:
+      hours: 24
+    sampling_size: 1440

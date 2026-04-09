@@ -1,0 +1,47 @@
+# Energy Package - EpexPredictor Forecast Advisory
+# Sends a notification when EpexPredictor forecasts deeply negative prices
+# in the next 4-6 hours, suggesting to connect the dumpload.
+
+automation:
+  - id: ems_dumpload_advisory
+    alias: "Energy - EMS - Dumpload Connection Advisory"
+    description: "Notify when negative prices forecast and dumpload not connected"
+    trigger:
+      - platform: time_pattern
+        hours: "/2"
+    condition:
+      # Only notify if dumpload is not currently connected
+      - condition: template
+        value_template: "{{ states('input_select.gen_port_mode') != 'SmartLoad' }}"
+      # Check if EpexPredictor forecasts prices below DUMP threshold in next 6 hours
+      - condition: template
+        value_template: >
+          {% set forecast = state_attr('sensor.epex_predictor_nl', 'forecast') %}
+          {% if forecast is none %}
+            false
+          {% else %}
+            {% set fee_ct = states('input_number.provider_fee') | float(20) / 10 %}
+            {% set profit_ct = states('input_number.dumpload_profit_threshold') | float(7) %}
+            {% set dump_threshold_kwh = -(profit_ct + fee_ct) / 100 %}
+            {% set now_ts = now().timestamp() %}
+            {% set window_end = now_ts + 6 * 3600 %}
+            {% set ns = namespace(found=false) %}
+            {% for point in forecast %}
+              {% set point_ts = as_timestamp(point.datetime) %}
+              {% if point_ts > now_ts and point_ts < window_end and point.value < dump_threshold_kwh %}
+                {% set ns.found = true %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.found }}
+          {% endif %}
+    action:
+      # Change to your notification service (e.g., notify.mobile_app_your_phone)
+      - action: notify.notify
+        data:
+          title: "Connect Dumpload"
+          message: >
+            EpexPredictor forecasts deeply negative prices in the next 6 hours.
+            Connect the 15kW dumpload heater to the SmartLoad port.
+          data:
+            tag: "ems_dumpload_advisory"
+            channel: "Energy"

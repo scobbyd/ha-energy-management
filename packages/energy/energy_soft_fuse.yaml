@@ -1,0 +1,192 @@
+# Energy Package - Soft Fuse Controller
+# Independent safety layer monitoring P1 per-phase current.
+# Runs every 10 seconds regardless of EMS state.
+# Adjusts PV limit to keep max phase current near fuse rating.
+#
+# Hardcoded for 25A fuses. To adjust for different fuse ratings, change:
+#   - Zone thresholds: 23/27/29A in the conditions below
+#   - Correction target: 25A (fuse_limit variable) and 24A (SAFE target)
+#   - fuse_limit variable in the action block
+#
+# Zones (25A fuse):
+#   SAFE      (< 23A)  — 1 min sustained → reduce PV toward state floor
+#   NOMINAL   (23-27A) — dead zone, no action
+#   WARNING   (27-29A) — 2 min sustained → increase PV to target 25A
+#   EMERGENCY (> 29A)  — instant → increase PV to target 25A, kill dumpload if insufficient
+#
+# Anti-oscillation: 5-min hold after any upward PV correction.
+# State transitions cancel the hold (load profile changed).
+
+automation:
+  - id: soft_fuse_controller
+    alias: "Energy - Soft Fuse - Controller"
+    description: "Monitor P1 phase currents every 10s, adjust PV to protect fuses"
+    trigger:
+      - platform: time_pattern
+        seconds: "/10"
+    condition:
+      # P1 must be available
+      - condition: template
+        value_template: >
+          {{ states('sensor.p1reader2_p1_reader_2_current_l1') not in ['unavailable', 'unknown']
+             and states('sensor.p1reader2_p1_reader_2_current_l2') not in ['unavailable', 'unknown']
+             and states('sensor.p1reader2_p1_reader_2_current_l3') not in ['unavailable', 'unknown'] }}
+    action:
+      - variables:
+          l1: "{{ states('sensor.p1reader2_p1_reader_2_current_l1') | float(0) }}"
+          l2: "{{ states('sensor.p1reader2_p1_reader_2_current_l2') | float(0) }}"
+          l3: "{{ states('sensor.p1reader2_p1_reader_2_current_l3') | float(0) }}"
+          max_phase: "{{ [l1, l2, l3] | max }}"
+          fuse_limit: 25
+          current_pv: "{{ states('number.inverter_pv_power') | float(13000) }}"
+          hold_until: "{{ states('input_datetime.ems_soft_fuse_hold_until') }}"
+          hold_active: "{{ as_timestamp(hold_until) > as_timestamp(now()) if hold_until not in ['unavailable', 'unknown'] else false }}"
+          ems_state: "{{ states('input_select.ems_state') }}"
+          state_floor: "{{ 400 if ems_state in ['GRID_USE', 'DUMP'] else 13000 }}"
+          safe_since: "{{ states('input_datetime.ems_soft_fuse_safe_since') }}"
+          warning_since: "{{ states('input_datetime.ems_soft_fuse_warning_since') }}"
+      - choose:
+          # --- EMERGENCY (> 29A) — instant correction ---
+          - conditions: "{{ max_phase > 29 }}"
+            sequence:
+              - variables:
+                  pv_increase: "{{ ((max_phase - fuse_limit) * 230 * 3) | int }}"
+                  new_pv: "{{ [current_pv + pv_increase, 13000] | min }}"
+              - choose:
+                  # PV correction sufficient
+                  - conditions: "{{ new_pv <= 13000 and (new_pv - current_pv) > 50 }}"
+                    sequence:
+                      - action: number.set_value
+                        target:
+                          entity_id: number.inverter_pv_power
+                        data:
+                          value: "{{ new_pv }}"
+                      - action: input_datetime.set_datetime
+                        target:
+                          entity_id: input_datetime.ems_soft_fuse_hold_until
+                        data:
+                          datetime: "{{ (now() + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S') }}"
+                      - action: system_log.write
+                        data:
+                          message: "Soft Fuse EMERGENCY: {{ max_phase }}A, PV {{ current_pv }}→{{ new_pv }}W"
+                          level: warning
+                          logger: homeassistant.energy.soft_fuse
+                # PV at max or insufficient — kill dumpload
+                default:
+                  - condition: template
+                    value_template: "{{ ems_state == 'DUMP' }}"
+                  - action: select.select_option
+                    target:
+                      entity_id: select.inverter_io_mode
+                    data:
+                      option: "Generator"
+                  - action: system_log.write
+                    data:
+                      message: "Soft Fuse EMERGENCY: {{ max_phase }}A, PV maxed — killed dumpload"
+                      level: error
+                      logger: homeassistant.energy.soft_fuse
+
+          # --- WARNING (27-29A) — track sustained, correct after 2min ---
+          - conditions: "{{ max_phase >= 27 and max_phase <= 29 }}"
+            sequence:
+              # Track when WARNING zone started
+              - choose:
+                  - conditions: >
+                      {{ safe_since == warning_since
+                         or warning_since in ['unavailable', 'unknown']
+                         or as_timestamp(warning_since) < as_timestamp(now()) - 180 }}
+                    sequence:
+                      - action: input_datetime.set_datetime
+                        target:
+                          entity_id: input_datetime.ems_soft_fuse_warning_since
+                        data:
+                          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+              # Check if sustained 2 min
+              - condition: template
+                value_template: >
+                  {{ warning_since not in ['unavailable', 'unknown']
+                     and (as_timestamp(now()) - as_timestamp(warning_since)) >= 120 }}
+              - variables:
+                  pv_increase: "{{ ((max_phase - fuse_limit) * 230 * 3) | int }}"
+                  new_pv: "{{ [current_pv + pv_increase, 13000] | min }}"
+              - condition: template
+                value_template: "{{ (new_pv - current_pv) > 50 }}"
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_pv_power
+                data:
+                  value: "{{ new_pv }}"
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: input_datetime.ems_soft_fuse_hold_until
+                data:
+                  datetime: "{{ (now() + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S') }}"
+              # Kill dumpload if PV at max and still in WARNING
+              - condition: template
+                value_template: "{{ new_pv >= 13000 and ems_state == 'DUMP' }}"
+              - action: select.select_option
+                target:
+                  entity_id: select.inverter_io_mode
+                data:
+                  option: "Generator"
+              - action: system_log.write
+                data:
+                  message: "Soft Fuse WARNING sustained: {{ max_phase }}A, PV maxed — killed dumpload"
+                  level: warning
+                  logger: homeassistant.energy.soft_fuse
+
+          # --- SAFE (< 23A) — track sustained, reduce PV after 1min ---
+          - conditions: "{{ max_phase < 23 }}"
+            sequence:
+              # Reset WARNING tracker
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: input_datetime.ems_soft_fuse_warning_since
+                data:
+                  datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+              # Track when SAFE zone started
+              - choose:
+                  - conditions: >
+                      {{ safe_since in ['unavailable', 'unknown']
+                         or as_timestamp(safe_since) < as_timestamp(now()) - 120 }}
+                    sequence:
+                      - action: input_datetime.set_datetime
+                        target:
+                          entity_id: input_datetime.ems_soft_fuse_safe_since
+                        data:
+                          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+              # Only reduce PV if hold expired and sustained 1 min
+              - condition: template
+                value_template: "{{ not hold_active }}"
+              - condition: template
+                value_template: >
+                  {{ safe_since not in ['unavailable', 'unknown']
+                     and (as_timestamp(now()) - as_timestamp(safe_since)) >= 60 }}
+              - variables:
+                  pv_decrease: "{{ ((24 - max_phase) * 230 * 3) | int }}"
+                  new_pv: "{{ [current_pv - pv_decrease, state_floor] | max }}"
+              - condition: template
+                value_template: "{{ (current_pv - new_pv) > 50 }}"
+              - action: number.set_value
+                target:
+                  entity_id: number.inverter_pv_power
+                data:
+                  value: "{{ new_pv }}"
+              - action: system_log.write
+                data:
+                  message: "Soft Fuse SAFE: {{ max_phase }}A, PV {{ current_pv }}→{{ new_pv }}W (floor={{ state_floor }})"
+                  level: info
+                  logger: homeassistant.energy.soft_fuse
+
+        # --- NOMINAL (23-27A) — reset zone trackers, no action ---
+        default:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.ems_soft_fuse_safe_since
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.ems_soft_fuse_warning_since
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"

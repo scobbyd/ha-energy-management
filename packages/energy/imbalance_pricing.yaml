@@ -1,0 +1,79 @@
+# Energy Package - Imbalance Pricing
+# Real-time TenneT imbalance price monitoring via TenEnergy public endpoint
+#
+# For energy suppliers that bill on TenneT imbalance settlement prices (quarter-hourly),
+# NOT day-ahead EPEX/Nord Pool. Polls the free TenEnergy endpoint every 60s
+# for current sell/buy prices and regulation state (regelstand).
+#
+# Data source: https://services.tenergy.nl/public.aspx/actualimbalanceprices
+# - No API key required, no rate limits
+# - Returns HTML table with minute-by-minute imbalance data
+# - Prices in EUR/MWh, comma-decimal Dutch format
+#
+# Dependencies:
+# - curl, python3 (available on HAOS)
+#
+# Entities:
+# - sensor.tennet_imbalance_prices        : Master sensor (buy price as state, all data as JSON attributes)
+# - sensor.tennet_imbalance_sell_price     : Feed-in/sell price (EUR/MWh) — what the supplier pays us
+# - sensor.tennet_imbalance_buy_price      : Consumption/buy price (EUR/MWh)
+# - sensor.tennet_imbalance_regelstand     : Grid regulation state (UP/DOWN/UP_AND_DOWN/NONE)
+
+command_line:
+  - sensor:
+      name: "TenneT Imbalance Prices"
+      unique_id: tennet_imbalance_prices
+      command: >
+        curl -s 'https://services.tenergy.nl/public.aspx/actualimbalanceprices' |
+        python3 -c "import sys,re,html,json;
+        h=sys.stdin.read();
+        rows=re.findall(r'<tr[^>]*>(.*?)</tr>',h,flags=re.S);
+        data=[[re.sub(r'\s+',' ',re.sub(r'<[^>]+>',' ',html.unescape(c))).strip()
+        for c in re.findall(r'<t[dh][^>]*>(.*?)</t[dh]>',r,flags=re.S)] for r in rows];
+        r=next((x for x in data if len(x)>=10 and re.match(r'^\d+$',x[0])),None);
+        u=float(r[3].replace(',','.')) if r else 0;
+        d=float(r[4].replace(',','.')) if r else 0;
+        rs='UP_AND_DOWN' if u>0 and d>0 else 'DOWN' if d>0 else 'UP' if u>0 else 'NONE';
+        print(json.dumps({'sell':r[8].replace(',','.'),'buy':r[9].replace(',','.'),'regelstand':rs,
+        'opregelen_mw':r[3].replace(',','.'),'afregelen_mw':r[4].replace(',','.')}) if r else '{}')"
+      scan_interval: 60
+      value_template: "{{ value_json.sell | default('unavailable') }}"
+      unit_of_measurement: "EUR/MWh"
+      json_attributes:
+        - sell
+        - buy
+        - regelstand
+        - opregelen_mw
+        - afregelen_mw
+
+template:
+  - sensor:
+      - name: "TenneT Imbalance Sell Price"
+        unique_id: tennet_imbalance_sell_price
+        unit_of_measurement: "EUR/MWh"
+        state_class: measurement
+        state: "{{ state_attr('sensor.tennet_imbalance_prices', 'sell') | float(0) }}"
+        icon: mdi:cash-minus
+        availability: >
+          {{ state_attr('sensor.tennet_imbalance_prices', 'sell') is not none }}
+
+      - name: "TenneT Imbalance Buy Price"
+        unique_id: tennet_imbalance_buy_price
+        unit_of_measurement: "EUR/MWh"
+        state_class: measurement
+        state: "{{ state_attr('sensor.tennet_imbalance_prices', 'buy') | float(0) }}"
+        icon: mdi:cash-plus
+        availability: >
+          {{ state_attr('sensor.tennet_imbalance_prices', 'buy') is not none }}
+
+      - name: "TenneT Imbalance Regelstand"
+        unique_id: tennet_imbalance_regelstand
+        state: "{{ state_attr('sensor.tennet_imbalance_prices', 'regelstand') | default('unknown') }}"
+        icon: >
+          {% set rs = state_attr('sensor.tennet_imbalance_prices', 'regelstand') %}
+          {% if rs == 'DOWN' %}mdi:arrow-down-bold
+          {% elif rs == 'UP' %}mdi:arrow-up-bold
+          {% elif rs == 'UP_AND_DOWN' %}mdi:arrow-up-down-bold
+          {% else %}mdi:help-circle{% endif %}
+        availability: >
+          {{ state_attr('sensor.tennet_imbalance_prices', 'regelstand') is not none }}

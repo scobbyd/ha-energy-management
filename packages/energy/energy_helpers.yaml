@@ -1,0 +1,176 @@
+# Energy Package - EMS Helpers
+# All input_number, input_select, input_datetime, and timer entities
+# for the Energy Management System state machine and Soft Fuse.
+
+input_boolean:
+  ems_sell_enabled:
+    name: "EMS Sell Enabled"
+    icon: mdi:trending-up
+    initial: false
+
+  ems_grid_use_enabled:
+    name: "EMS Grid Use Enabled"
+    icon: mdi:transmission-tower-import
+    initial: false
+
+  ems_dump_enabled:
+    name: "EMS Dump Enabled"
+    icon: mdi:fire
+    initial: false
+
+  ems_dumpload_connected:
+    name: "Dumpload Connected"
+    icon: mdi:radiator
+    initial: false
+
+input_select:
+  ems_state:
+    name: "EMS State"
+    icon: mdi:state-machine
+    options:
+      - "SELL"
+      - "NORMAL"
+      - "SELF_CONSUME"
+      - "GRID_USE"
+      - "DUMP"
+    initial: "NORMAL"
+
+  gen_port_mode:
+    name: "GEN Port Mode"
+    icon: mdi:power-plug
+    options:
+      - "Generator"
+      - "Microinverter"
+      - "SmartLoad"
+    initial: "Microinverter"
+
+input_number:
+  # Price & Fee
+  provider_fee:
+    name: "Provider Fee"
+    icon: mdi:currency-eur
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "EUR/MWh"
+    initial: 20
+
+  dumpload_profit_threshold:
+    name: "Dumpload Profit Threshold"
+    icon: mdi:fire
+    min: 0
+    max: 30
+    step: 0.5
+    unit_of_measurement: "ct/kWh"
+    initial: 7
+
+  # Inverter Control
+  dump_soc_entry:
+    name: "DUMP SOC Entry"
+    icon: mdi:battery-70
+    min: 0
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    initial: 70
+
+  dump_soc_fallback:
+    name: "DUMP SOC Fallback"
+    icon: mdi:battery-alert
+    min: 0
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    initial: 60
+
+  # Transition Control
+  transition_hysteresis:
+    name: "Transition Hysteresis"
+    icon: mdi:swap-horizontal
+    min: 0
+    max: 10
+    step: 0.5
+    unit_of_measurement: "ct"
+    initial: 5
+
+  transition_fast_spread:
+    name: "Transition Fast Spread"
+    icon: mdi:speedometer
+    min: 1
+    max: 20
+    step: 0.5
+    unit_of_measurement: "ct"
+    initial: 4
+
+  transition_instant_spread:
+    name: "Transition Instant Spread"
+    icon: mdi:flash
+    min: 5
+    max: 50
+    step: 1
+    unit_of_measurement: "ct"
+    initial: 15
+
+  # SELL spike detection
+  sell_spike_spread:
+    name: "SELL Spike Spread"
+    icon: mdi:trending-up
+    min: 5
+    max: 100
+    step: 1
+    unit_of_measurement: "ct"
+    initial: 30
+
+  sell_spike_floor:
+    name: "SELL Spike Floor"
+    icon: mdi:floor-plan
+    min: 10
+    max: 100
+    step: 5
+    unit_of_measurement: "ct"
+    initial: 40
+
+  transition_slow_duration:
+    name: "Transition Slow Duration"
+    icon: mdi:timer-sand
+    min: 1
+    max: 30
+    step: 1
+    unit_of_measurement: "min"
+    initial: 10
+
+  transition_fast_duration:
+    name: "Transition Fast Duration"
+    icon: mdi:timer
+    min: 0.5
+    max: 10
+    step: 0.5
+    unit_of_measurement: "min"
+    initial: 3
+
+input_datetime:
+  # Soft Fuse hold tracking
+  ems_soft_fuse_hold_until:
+    name: "Soft Fuse Hold Until"
+    has_date: true
+    has_time: true
+
+  # Soft Fuse zone tracking
+  ems_soft_fuse_safe_since:
+    name: "Soft Fuse Safe Since"
+    has_date: true
+    has_time: true
+
+  ems_soft_fuse_warning_since:
+    name: "Soft Fuse Warning Since"
+    has_date: true
+    has_time: true
+
+timer:
+  ems_slow:
+    name: "EMS Slow Timer"
+    icon: mdi:timer-sand
+
+  ems_fast:
+    name: "EMS Fast Timer"
+    icon: mdi:timer

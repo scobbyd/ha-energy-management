@@ -1,0 +1,30 @@
+# Energy Package - Dumpload Connection Handler
+# When user disconnects dumpload (toggle off), exit DUMP state.
+# When user connects dumpload (toggle on), set IO mode ready.
+
+automation:
+  - id: ems_dumpload_disconnected
+    alias: "Energy - EMS - Dumpload Disconnected"
+    description: "Exit DUMP if dumpload toggle turned off"
+    trigger:
+      - platform: state
+        entity_id: input_boolean.ems_dumpload_connected
+        to: "off"
+    condition:
+      - condition: state
+        entity_id: input_select.ems_state
+        state: "DUMP"
+    action:
+      - action: select.select_option
+        target:
+          entity_id: select.inverter_io_mode
+        data:
+          option: "Generator"
+      - action: script.ems_apply_state
+        data:
+          state: "GRID_USE"
+      - action: system_log.write
+        data:
+          message: "EMS: Dumpload disconnected while in DUMP → GRID_USE"
+          level: warning
+          logger: homeassistant.energy.ems

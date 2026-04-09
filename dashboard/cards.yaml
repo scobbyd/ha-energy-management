@@ -1,0 +1,88 @@
+# EMS Dashboard Cards
+# Copy these into your Lovelace dashboard (YAML mode or via UI card editor)
+# Requires: fold-entity-row (HACS frontend plugin)
+
+# ── Energy Management Status Card ─────────────────────────────────────────
+type: entities
+title: Energy Management
+show_header_toggle: false
+entities:
+  - entity: input_select.ems_state
+    name: EMS State
+  - entity: sensor.ems_ideal_state
+    name: Ideal State
+  - entity: sensor.ems_transition_spread
+    name: Transition Spread
+  - entity: timer.ems_slow
+    name: Slow Timer
+  - entity: timer.ems_fast
+    name: Fast Timer
+  - type: divider
+  - entity: binary_sensor.ems_dumpload_active
+    name: Dumpload Active
+  - type: divider
+  - type: custom:fold-entity-row
+    head:
+      type: section
+      label: "Settings"
+    entities:
+      - type: section
+        label: "Enable / Disable"
+      - entity: input_boolean.ems_sell_enabled
+        name: "SELL (stop battery charge during spikes)"
+      - entity: input_boolean.ems_grid_use_enabled
+        name: "GRID_USE (force grid consumption)"
+      - entity: input_boolean.ems_dump_enabled
+        name: "DUMP (grid use + SmartLoad activated)"
+      - entity: input_boolean.ems_dumpload_connected
+        name: "Dumpload Connected to Inverter"
+      - type: divider
+      - type: section
+        label: "SELL — Price Spike"
+      - entity: input_number.sell_spike_spread
+        name: Spike Spread (above 24h avg)
+      - entity: input_number.sell_spike_floor
+        name: Spike Floor (absolute min)
+      - entity: sensor.tennet_sell_price_24h_average
+        name: 24h Sell Average
+      - type: divider
+      - type: section
+        label: "DUMP — Negative Prices"
+      - entity: input_number.dumpload_profit_threshold
+        name: Profit Threshold
+      - entity: input_number.dump_soc_entry
+        name: SOC Entry
+      - entity: input_number.dump_soc_fallback
+        name: SOC Fallback
+      - type: divider
+      - type: section
+        label: "General"
+      - entity: input_number.provider_fee
+        name: Supplier Fee
+      - entity: input_number.transition_hysteresis
+        name: Hysteresis
+      - entity: input_number.transition_fast_spread
+        name: Fast Spread
+      - entity: input_number.transition_instant_spread
+        name: Instant Spread
+      - entity: input_number.transition_slow_duration
+        name: Slow Timer Duration
+      - entity: input_number.transition_fast_duration
+        name: Fast Timer Duration
+
+---
+# ── Imbalance Prices Card ─────────────────────────────────────────────────
+type: entities
+title: Imbalance Prices
+show_header_toggle: false
+entities:
+  - entity: sensor.tennet_imbalance_sell_price
+    name: Sell Price (EUR/MWh)
+  - entity: sensor.tennet_imbalance_buy_price
+    name: Buy Price (EUR/MWh)
+  - entity: sensor.tennet_imbalance_regelstand
+    name: Regelstand
+  # Optional: uncomment if you have the Nord Pool integration installed
+  # - type: divider
+  # - entity: sensor.nord_pool_nl_current_price
+  #   name: Day-Ahead Spot Price
