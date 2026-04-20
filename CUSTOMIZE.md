@@ -39,7 +39,7 @@ This package was built for a Deye SUN-12K-SG04LP3-EU hybrid inverter with the So
 
 ### Notifications
 
-The `energy_forecast.yaml` file is NOT included — it was specific to the original setup. Build your own notification if needed.
+`energy_forecast.yaml` uses `notify.notify` as a placeholder. Change it to your mobile app notify service (e.g., `notify.mobile_app_your_phone`) or remove the file if you don't need the "plug in dumpload" lookahead warning.
 
 ## What to Remove If You Don't Have...
 

@@ -2,26 +2,27 @@
 # All input_number, input_select, input_datetime, and timer entities
 # for the Energy Management System state machine and Soft Fuse.
 
+# NOTE: input_number/input_boolean/input_select values without `initial:` are
+# restored from storage on restart. Setting `initial:` forces the value every
+# time HA starts — overriding user tuning. Keep these defaults documented in
+# comments instead.
+
 input_boolean:
   ems_sell_enabled:
     name: "EMS Sell Enabled"
     icon: mdi:trending-up
-    initial: false
 
   ems_grid_use_enabled:
     name: "EMS Grid Use Enabled"
     icon: mdi:transmission-tower-import
-    initial: false
 
   ems_dump_enabled:
     name: "EMS Dump Enabled"
     icon: mdi:fire
-    initial: false
 
-  ems_dumpload_connected:
-    name: "Dumpload Connected"
-    icon: mdi:radiator
-    initial: false
+  ems_enabled:
+    name: "EMS Enabled"
+    icon: mdi:power
 
 input_select:
   ems_state:
@@ -33,7 +34,6 @@ input_select:
       - "SELF_CONSUME"
       - "GRID_USE"
       - "DUMP"
-    initial: "NORMAL"
 
   gen_port_mode:
     name: "GEN Port Mode"
@@ -42,10 +42,9 @@ input_select:
       - "Generator"
       - "Microinverter"
       - "SmartLoad"
-    initial: "Microinverter"
 
 input_number:
-  # Price & Fee
+  # Price & Fee (default: 20 EUR/MWh)
   provider_fee:
     name: "Provider Fee"
     icon: mdi:currency-eur
@@ -53,8 +52,8 @@ input_number:
     max: 100
     step: 1
     unit_of_measurement: "EUR/MWh"
-    initial: 20
 
+  # default: 7 ct/kWh
   dumpload_profit_threshold:
     name: "Dumpload Profit Threshold"
     icon: mdi:fire
@@ -62,9 +61,8 @@ input_number:
     max: 30
     step: 0.5
     unit_of_measurement: "ct/kWh"
-    initial: 7
 
-  # Inverter Control
+  # Inverter Control (default: 70%)
   dump_soc_entry:
     name: "DUMP SOC Entry"
     icon: mdi:battery-70
@@ -72,8 +70,8 @@ input_number:
     max: 100
     step: 5
     unit_of_measurement: "%"
-    initial: 70
 
+  # default: 60%
   dump_soc_fallback:
     name: "DUMP SOC Fallback"
     icon: mdi:battery-alert
@@ -81,9 +79,8 @@ input_number:
     max: 100
     step: 5
     unit_of_measurement: "%"
-    initial: 60
 
-  # Transition Control
+  # Transition Control (default: 2 ct)
   transition_hysteresis:
     name: "Transition Hysteresis"
     icon: mdi:swap-horizontal
@@ -91,8 +88,8 @@ input_number:
     max: 10
     step: 0.5
     unit_of_measurement: "ct"
-    initial: 5
 
+  # default: 4 ct
   transition_fast_spread:
     name: "Transition Fast Spread"
     icon: mdi:speedometer
@@ -100,8 +97,8 @@ input_number:
     max: 20
     step: 0.5
     unit_of_measurement: "ct"
-    initial: 4
 
+  # default: 15 ct
   transition_instant_spread:
     name: "Transition Instant Spread"
     icon: mdi:flash
@@ -109,9 +106,8 @@ input_number:
     max: 50
     step: 1
     unit_of_measurement: "ct"
-    initial: 15
 
-  # SELL spike detection
+  # SELL spike detection (default: 30 ct)
   sell_spike_spread:
     name: "SELL Spike Spread"
     icon: mdi:trending-up
@@ -119,8 +115,8 @@ input_number:
     max: 100
     step: 1
     unit_of_measurement: "ct"
-    initial: 30
 
+  # default: 40 ct
   sell_spike_floor:
     name: "SELL Spike Floor"
     icon: mdi:floor-plan
@@ -128,8 +124,8 @@ input_number:
     max: 100
     step: 5
     unit_of_measurement: "ct"
-    initial: 40
 
+  # default: 10 min
   transition_slow_duration:
     name: "Transition Slow Duration"
     icon: mdi:timer-sand
@@ -137,8 +133,8 @@ input_number:
     max: 30
     step: 1
     unit_of_measurement: "min"
-    initial: 10
 
+  # default: 3 min
   transition_fast_duration:
     name: "Transition Fast Duration"
     icon: mdi:timer
@@ -146,7 +142,6 @@ input_number:
     max: 10
     step: 0.5
     unit_of_measurement: "min"
-    initial: 3
 
 input_datetime:
   # Soft Fuse hold tracking

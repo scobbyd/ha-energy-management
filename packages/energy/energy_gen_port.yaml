@@ -1,30 +1,30 @@
-# Energy Package - Dumpload Connection Handler
-# When user disconnects dumpload (toggle off), exit DUMP state.
-# When user connects dumpload (toggle on), set IO mode ready.
+# Energy Package - GEN Port Mode Handler
+# Syncs select.inverter_io_mode when gen_port_mode changes.
+# Exits DUMP state if SmartLoad device is disconnected.
 
 automation:
-  - id: ems_dumpload_disconnected
-    alias: "Energy - EMS - Dumpload Disconnected"
-    description: "Exit DUMP if dumpload toggle turned off"
+  - id: gen_port_mode_changed
+    alias: "Energy - GEN Port - Mode Changed"
+    description: "Sync IO mode when gen_port_mode changes; exit DUMP if leaving SmartLoad"
     trigger:
       - platform: state
-        entity_id: input_boolean.ems_dumpload_connected
-        to: "off"
-    condition:
-      - condition: state
-        entity_id: input_select.ems_state
-        state: "DUMP"
+        entity_id: input_select.gen_port_mode
     action:
-      - action: select.select_option
-        target:
-          entity_id: select.inverter_io_mode
-        data:
-          option: "Generator"
-      - action: script.ems_apply_state
-        data:
-          state: "GRID_USE"
-      - action: system_log.write
-        data:
-          message: "EMS: Dumpload disconnected while in DUMP → GRID_USE"
-          level: warning
-          logger: homeassistant.energy.ems
+      - choose:
+          # Leaving SmartLoad while in DUMP → exit DUMP
+          - conditions:
+              - "{{ trigger.from_state.state == 'SmartLoad' and is_state('input_select.ems_state', 'DUMP') }}"
+            sequence:
+              - action: script.ems_apply_state
+                data:
+                  state: "GRID_USE"
+              - action: system_log.write
+                data:
+                  message: "EMS: GEN port changed from SmartLoad while in DUMP → GRID_USE"
+                  level: warning
+                  logger: homeassistant.energy.ems
+        # Otherwise, re-apply current state to update IO mode
+        default:
+          - action: script.ems_apply_state
+            data:
+              state: "{{ states('input_select.ems_state') }}"

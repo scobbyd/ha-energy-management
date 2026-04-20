@@ -34,8 +34,8 @@ entities:
         name: "GRID_USE (force grid consumption)"
       - entity: input_boolean.ems_dump_enabled
         name: "DUMP (grid use + SmartLoad activated)"
-      - entity: input_boolean.ems_dumpload_connected
-        name: "Dumpload Connected to Inverter"
+      - entity: input_select.gen_port_mode
+        name: "GEN Port Mode (Microinverter/SmartLoad/Generator)"
       - type: divider
       - type: section
         label: "SELL — Price Spike"

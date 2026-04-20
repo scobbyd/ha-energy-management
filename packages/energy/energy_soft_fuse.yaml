@@ -21,6 +21,7 @@ automation:
   - id: soft_fuse_controller
     alias: "Energy - Soft Fuse - Controller"
     description: "Monitor P1 phase currents every 10s, adjust PV to protect fuses"
+    mode: single
     trigger:
       - platform: time_pattern
         seconds: "/10"
