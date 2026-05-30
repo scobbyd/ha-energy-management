@@ -24,6 +24,10 @@ input_boolean:
     name: "EMS Enabled"
     icon: mdi:power
 
+  afrr_pv_priority_enabled:
+    name: "aFRR PV Priority Enabled"
+    icon: mdi:solar-power-variant
+
 input_select:
   ems_state:
     name: "EMS State"
@@ -140,6 +144,106 @@ input_number:
     icon: mdi:timer
     min: 0.5
     max: 10
+    step: 0.5
+    unit_of_measurement: "min"
+
+  # ------------------------------------------------------------------
+  # aFRR PV Priority — discharge ceiling pre-stage tunables.
+  # Formula: target_W = max(min(ac_ceiling - pv_padded, ac_ceiling), floor_W)
+  #          target_A = clamp(target_W / Vbat, min_A, max_A)
+  # See packages/energy/afrr_pv_priority.yaml header for full context.
+  # ------------------------------------------------------------------
+
+  # AC headroom (default: 11800 W) — combined battery + PV target. Sit
+  # ~200 W under the Deye 12 kW AC ceiling to absorb fluctuations.
+  afrr_ac_ceiling:
+    name: "aFRR AC Ceiling Target"
+    icon: mdi:transmission-tower
+    min: 8000
+    max: 11900
+    step: 100
+    unit_of_measurement: "W"
+
+  # PV activation threshold (default: 500 W) — below this, full 240 A is
+  # preferred for max aFRR revenue (savings negligible at low PV).
+  afrr_pv_threshold:
+    name: "aFRR PV Activation Threshold"
+    icon: mdi:weather-sunny
+    min: 100
+    max: 3000
+    step: 50
+    unit_of_measurement: "W"
+
+  # Battery target floor in W (default: 2000 W) — minimum power the
+  # battery must contribute. Keep > 0 because the pack's BMS balancing
+  # is unstable at near-zero discharge under load (OVP imbalance issue).
+  afrr_target_floor_w:
+    name: "aFRR Battery Target Floor (W)"
+    icon: mdi:battery-arrow-down
+    min: 0
+    max: 6000
+    step: 100
+    unit_of_measurement: "W"
+
+  # Min discharge clamp in A (default: 40 A) — cascading floor after
+  # voltage division. Dominates floor_W when Vbat is low (e.g. 40 A ×
+  # 50 V = 2000 W matches floor_W; at 53 V floor_W wins).
+  afrr_min_amps:
+    name: "aFRR Min Discharge Clamp"
+    icon: mdi:current-dc
+    min: 0
+    max: 100
+    step: 5
+    unit_of_measurement: "A"
+
+  # Max discharge clamp in A (default: 240 A) — Deye/BMS hardware
+  # ceiling. Lower only if you want a softer max for thermal reasons.
+  afrr_max_amps:
+    name: "aFRR Max Discharge Clamp"
+    icon: mdi:current-dc
+    min: 100
+    max: 280
+    step: 5
+    unit_of_measurement: "A"
+
+  # PV over-estimate, percent (default: 5 %) — at high PV, pad up by
+  # this fraction to absorb upward fluctuations without breaching ceiling.
+  afrr_pv_padding_pct:
+    name: "aFRR PV Padding (%)"
+    icon: mdi:plus-circle-outline
+    min: 0
+    max: 20
+    step: 0.5
+    unit_of_measurement: "%"
+
+  # PV over-estimate, flat (default: 200 W) — at low PV, the % becomes
+  # too small. Take whichever of the two pads is *smaller* for a tight
+  # but safe over-estimate.
+  afrr_pv_padding_flat:
+    name: "aFRR PV Padding (W)"
+    icon: mdi:plus-box-outline
+    min: 0
+    max: 1000
+    step: 50
+    unit_of_measurement: "W"
+
+  # Step deadband (default: 5 A) — minimum |Δamps| before writing the
+  # register. Prevents Modbus thrash and EEPROM wear on minor PV jitter.
+  afrr_step_deadband:
+    name: "aFRR Step Deadband"
+    icon: mdi:vibrate
+    min: 1
+    max: 30
+    step: 1
+    unit_of_measurement: "A"
+
+  # Restore delay (default: 2 min) — how long PV must stay below
+  # threshold before lifting the ceiling back to 240 A for full aFRR.
+  afrr_restore_delay:
+    name: "aFRR Restore Delay"
+    icon: mdi:timer-sand
+    min: 0.5
+    max: 15
     step: 0.5
     unit_of_measurement: "min"
 

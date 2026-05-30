@@ -17,7 +17,8 @@ Monitors real-time TenneT imbalance prices and automatically adjusts your solar 
 ### Safety Features
 
 - **Parallel timer system** prevents state flipping: SLOW (10min), FAST (3min), INSTANT (>15ct spread)
-- **Soft Fuse** monitors P1 per-phase current every 10s, adjusts PV to protect your fuses
+- **Soft Fuse** monitors P1 per-phase current every 10s and adjusts the battery discharge ceiling to protect your fuses
+- **Charge-current fail-safe**: every non-SELL state restores full charge current, so leaving a SELL spike can never strand the battery at 0 A charge
 - **SOC fallback** exits DUMP when battery drops below 60%
 - **Opt-in states** for anything that overrides battery registers (SELL, GRID_USE, DUMP default to OFF)
 
@@ -58,6 +59,10 @@ Monitors real-time TenneT imbalance prices and automatically adjusts your solar 
 | `energy_state_machine.yaml` | Core: ideal state sensor, transition logic, state entry script |
 | `energy_soft_fuse.yaml` | Independent fuse protection (needs P1 meter) |
 | `energy_gen_port.yaml` | GEN port mode selector (remove if not applicable) |
+| `energy_forecast.yaml` | Look-ahead "connect the dumpload" notification |
+| `power_monitoring.yaml` | Net house usage + total PV sensors (the dashboard uses `sensor.nett_energy_use_house`) |
+| `afrr_pv_priority.yaml` | Proactive discharge-current cap so aFRR discharge doesn't curtail rooftop PV (see [CUSTOMIZE.md](CUSTOMIZE.md)) |
+| `morning_export_priority.yaml` | **Experimental**, optional, master-OFF — Solcast-gated morning PV export (see below) |
 
 ### Dashboard
 
@@ -72,8 +77,8 @@ Every 60 seconds (when prices update), the system computes the "ideal state" fro
 ```
 Price signal → Compute ideal state → Compare with current
                                           ↓
-                   spread < 5ct (hysteresis) → ignore
-                   spread 5-15ct → SLOW timer (10min) + FAST timer (3min)
+                   spread < 2ct (hysteresis) → ignore
+                   spread 2-15ct → SLOW timer (10min) + FAST timer (3min)
                    spread > 15ct → INSTANT transition
 ```
 
@@ -92,6 +97,27 @@ Three states override battery registers that your energy supplier's EMS might al
 - **DUMP**: Same as GRID_USE + activates dumpload
 
 All three default to OFF. Enable them via dashboard toggles when you're comfortable with the trade-off.
+
+### Coexisting with an external supplier EMS
+
+If your energy supplier also runs its own EMS that writes the inverter (for example to grid-charge the battery on cheap imbalance buy prices), this package is built to share the inverter rather than fight it:
+
+- **Grid-charge ownership yield**: only the **SELL** state forces the grid-charge switch (`switch.inverter_battery_grid_charging`) OFF — you never want to pull from the grid while exporting into a price spike. In **NORMAL** and **SELF_CONSUME** the package no longer touches that switch, leaving grid-charging to the external supplier EMS.
+- **Charge-current fail-safe default**: before applying any state, `script.ems_apply_state` writes the full charge-current limit (240 A); only the SELL branch overrides it to 0 A. This means leaving a SELL spike always restores charging, so a SELL→NORMAL transition can never strand the battery at 0 A charge.
+- **Manual state override**: picking a state from the `EMS State` dropdown re-runs the apply script (loop-safe, gated on a UI user context), so a manual selection actually actuates the inverter levers instead of just updating the status tracker. The EMS keeps evaluating prices and transitions away normally afterward.
+- **PV-cap refresh**: in `DUMP`/`GRID_USE` the PV limit is re-asserted every 30 s, because an external writer (the supplier EMS or a firmware watchdog) periodically clears the PV-limit register.
+
+### Soft Fuse (battery-discharge ceiling)
+
+The Soft Fuse is an independent safety layer (gated on the global `ems_enabled`) that watches P1 per-phase current every 10 s and protects your fuses by adjusting the **battery discharge ceiling** (`number.inverter_battery_max_discharging_current`). It steps the ceiling **up** on overload and ladders it **down** when phases are comfortably safe, using a `5 A of discharge ceiling per 1 A of phase overshoot` formula with a 30 s cooldown between up-steps. (Earlier versions lifted PV instead; the inverter firmware only honors the PV limit in some work modes, whereas the discharge-ceiling register is honored everywhere and written instantly.) See [CUSTOMIZE.md](CUSTOMIZE.md) for fuse-rating and single-phase tuning.
+
+### aFRR PV Priority
+
+`afrr_pv_priority.yaml` proactively caps battery discharge current during aFRR/imbalance discharge so battery + PV together stay just under the inverter's AC output ceiling, keeping rooftop PV (MPPT) from being curtailed to 0 W. It has its own master toggle (`input_boolean.afrr_pv_priority_enabled`, default OFF) and nine `afrr_*` tunables — see [CUSTOMIZE.md](CUSTOMIZE.md).
+
+### Experimental: Morning Export Priority (Solcast)
+
+`morning_export_priority.yaml` is **optional, experimental, and ships master-OFF** (`input_boolean.mep_enabled`). During a morning window, and only while the EMS is in NORMAL, it soft-floors the battery **charge** current so morning PV exports at positive prices — but only when a Solcast forecast says the midday cheap-price PV will refill the pack. It depends on extra entities not in the core EMS (Solcast forecast, a price sensor with `prices_today`, a daily consumption `utility_meter`, and `sensor.inverter_battery_capacity`). It is not production-validated; leave it disabled until you have dry-run it on your own data. See [CUSTOMIZE.md](CUSTOMIZE.md) for the full dependency list.
 
 ## Algorithm Verification
 

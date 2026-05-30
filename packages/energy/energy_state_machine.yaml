@@ -44,73 +44,84 @@ template:
           {% else %}
             NORMAL
           {% endif %}
+        # spread: ct/kWh past the threshold to leave the current state. Lives as
+        # an attribute (not a separate sensor) so it commits atomically with the
+        # ideal state above — the price evaluator reads both from this one state
+        # object and can never see a spread that lags the ideal by a tick.
+        # Computed inline from raw inputs (no self-reference to this sensor's
+        # state); when ideal == current every urgency term is <= 0, so the max
+        # is 0 without needing to read the ideal back.
+        attributes:
+          spread: >
+            {% set current = states('input_select.ems_state') %}
+            {% if current in ['unavailable', 'unknown'] %}
+              0
+            {% else %}
+              {% set sell = states('sensor.tennet_imbalance_sell_price') | float(0) %}
+              {% set buy = states('sensor.tennet_imbalance_buy_price') | float(0) %}
+              {% set fee = states('input_number.provider_fee') | float(20) %}
+              {% set profit_ct = states('input_number.dumpload_profit_threshold') | float(7) %}
+              {% set dump_threshold = -(profit_ct * 10 + fee) %}
+              {% set sell_avg = states('sensor.tennet_sell_price_24h_average') | float(0) %}
+              {% set spike_spread_eur = states('input_number.sell_spike_spread') | float(30) * 10 %}
+              {% set spike_floor_eur = states('input_number.sell_spike_floor') | float(40) * 10 %}
+              {% set spike_threshold = sell_avg + spike_spread_eur %}
+              {% set pv_power = states('sensor.inverter_pv_power') | float(0) %}
+              {% set sell_enabled = is_state('input_boolean.ems_sell_enabled', 'on') %}
+              {% set grid_use_enabled = is_state('input_boolean.ems_grid_use_enabled', 'on') %}
+              {% set dump_enabled = is_state('input_boolean.ems_dump_enabled', 'on') %}
+              {% set smartload = is_state('input_select.gen_port_mode', 'SmartLoad') %}
+              {% set soc = states('sensor.inverter_battery') | float(0) %}
+              {% set soc_entry = states('input_number.dump_soc_entry') | float(70) %}
+              {# --- Max-magnitude spread: largest urgency to leave current state --- #}
+              {# SELL entry/exit #}
+              {% if current == 'SELL' %}
+                {% set u_sell = [0, (spike_threshold - sell) / 10] | max %}
+              {% elif sell_enabled and sell > spike_floor_eur and pv_power > 3000 %}
+                {% set u_sell = [0, (sell - spike_threshold) / 10] | max %}
+              {% else %}
+                {% set u_sell = 0 %}
+              {% endif %}
+              {# DUMP entry/exit #}
+              {% if current == 'DUMP' %}
+                {% set u_dump = [0, (buy - dump_threshold) / 10] | max %}
+              {% elif dump_enabled and smartload and soc > soc_entry %}
+                {% set u_dump = [0, (dump_threshold - buy) / 10] | max %}
+              {% else %}
+                {% set u_dump = 0 %}
+              {% endif %}
+              {# GRID_USE entry/exit #}
+              {% if current == 'GRID_USE' %}
+                {% set u_grid = [0, (buy + fee) / 10] | max %}
+              {% elif current != 'DUMP' and grid_use_enabled %}
+                {% set u_grid = [0, (-fee - buy) / 10] | max %}
+              {% else %}
+                {% set u_grid = 0 %}
+              {% endif %}
+              {# SELF_CONSUME entry/exit #}
+              {% if current == 'SELF_CONSUME' %}
+                {% set u_sc = [0, (sell - fee) / 10] | max %}
+              {% elif current == 'NORMAL' %}
+                {% set u_sc = [0, (fee - sell) / 10] | max %}
+              {% else %}
+                {% set u_sc = 0 %}
+              {% endif %}
+              {{ [u_sell, u_dump, u_grid, u_sc] | max | round(2) }}
+            {% endif %}
         availability: >
           {{ states('sensor.tennet_imbalance_sell_price') not in ['unavailable', 'unknown']
              and states('sensor.tennet_imbalance_buy_price') not in ['unavailable', 'unknown'] }}
 
+      # Dashboard proxy: surfaces the spread attribute as a standalone sensor so
+      # existing cards keep working. Display only — the evaluator reads the
+      # attribute on sensor.ems_ideal_state directly, not this sensor.
       - name: "EMS Transition Spread"
         unique_id: ems_transition_spread
         icon: mdi:arrow-expand-horizontal
         unit_of_measurement: "ct"
-        state: >
-          {% set current = states('input_select.ems_state') %}
-          {% set ideal = states('sensor.ems_ideal_state') %}
-          {% if ideal in ['unavailable', 'unknown'] or current == ideal %}
-            0
-          {% else %}
-            {% set sell = states('sensor.tennet_imbalance_sell_price') | float(0) %}
-            {% set buy = states('sensor.tennet_imbalance_buy_price') | float(0) %}
-            {% set fee = states('input_number.provider_fee') | float(20) %}
-            {% set profit_ct = states('input_number.dumpload_profit_threshold') | float(7) %}
-            {% set dump_threshold = -(profit_ct * 10 + fee) %}
-            {% set sell_avg = states('sensor.tennet_sell_price_24h_average') | float(0) %}
-            {% set spike_spread_eur = states('input_number.sell_spike_spread') | float(30) * 10 %}
-            {% set spike_floor_eur = states('input_number.sell_spike_floor') | float(40) * 10 %}
-            {% set spike_threshold = sell_avg + spike_spread_eur %}
-            {% set pv_power = states('sensor.inverter_pv_power') | float(0) %}
-            {% set sell_enabled = is_state('input_boolean.ems_sell_enabled', 'on') %}
-            {% set grid_use_enabled = is_state('input_boolean.ems_grid_use_enabled', 'on') %}
-            {% set dump_enabled = is_state('input_boolean.ems_dump_enabled', 'on') %}
-            {% set smartload = is_state('input_select.gen_port_mode', 'SmartLoad') %}
-            {% set soc = states('sensor.inverter_battery') | float(0) %}
-            {% set soc_entry = states('input_number.dump_soc_entry') | float(70) %}
-            {# --- Max-magnitude spread: largest urgency to leave current state --- #}
-            {# SELL entry/exit #}
-            {% if current == 'SELL' %}
-              {% set u_sell = [0, (spike_threshold - sell) / 10] | max %}
-            {% elif sell_enabled and sell > spike_floor_eur and pv_power > 3000 %}
-              {% set u_sell = [0, (sell - spike_threshold) / 10] | max %}
-            {% else %}
-              {% set u_sell = 0 %}
-            {% endif %}
-            {# DUMP entry/exit #}
-            {% if current == 'DUMP' %}
-              {% set u_dump = [0, (buy - dump_threshold) / 10] | max %}
-            {% elif dump_enabled and smartload and soc > soc_entry %}
-              {% set u_dump = [0, (dump_threshold - buy) / 10] | max %}
-            {% else %}
-              {% set u_dump = 0 %}
-            {% endif %}
-            {# GRID_USE entry/exit #}
-            {% if current == 'GRID_USE' %}
-              {% set u_grid = [0, (buy + fee) / 10] | max %}
-            {% elif current != 'DUMP' and grid_use_enabled %}
-              {% set u_grid = [0, (-fee - buy) / 10] | max %}
-            {% else %}
-              {% set u_grid = 0 %}
-            {% endif %}
-            {# SELF_CONSUME entry/exit #}
-            {% if current == 'SELF_CONSUME' %}
-              {% set u_sc = [0, (sell - fee) / 10] | max %}
-            {% elif current == 'NORMAL' %}
-              {% set u_sc = [0, (fee - sell) / 10] | max %}
-            {% else %}
-              {% set u_sc = 0 %}
-            {% endif %}
-            {{ [u_sell, u_dump, u_grid, u_sc] | max | round(2) }}
-          {% endif %}
+        state: "{{ state_attr('sensor.ems_ideal_state', 'spread') | float(0) }}"
         availability: >
-          {{ states('sensor.ems_ideal_state') not in ['unavailable', 'unknown'] }}
+          {{ state_attr('sensor.ems_ideal_state', 'spread') is not none }}
 
   - binary_sensor:
       - name: "EMS Dumpload Active"
@@ -153,6 +164,18 @@ script:
             {% if state == 'DUMP' %}SmartLoad
             {% elif gen_port == 'SmartLoad' %}Generator
             {% else %}{{ gen_port }}{% endif %}
+      # Default charge current to full max-amps (240A) before the choose.
+      # SELL overrides this to 0 to force export during a price spike; every
+      # other state inherits the default. This keeps charge current fail-safe:
+      # the only place 0A is ever written is the SELL branch, so leaving SELL
+      # can never strand the battery at 0A charge (a stranding bug seen in
+      # practice, where SELL -> NORMAL left charging pinned at 0 for ~15h
+      # overnight).
+      - action: number.set_value
+        target:
+          entity_id: number.inverter_battery_max_charging_current
+        data:
+          value: 240
       # Apply controls per state
       - choose:
           # --- SELL ---
@@ -173,6 +196,10 @@ script:
                   entity_id: number.inverter_battery_max_charging_current
                 data:
                   value: 0
+              # SELL is the ONLY state that forces grid charging off: never pull
+              # from the grid while exporting into a price spike. In every other
+              # state the external supplier EMS owns this switch (it grid-charges
+              # on cheap imbalance buy prices), so we no longer fight it there.
               - action: switch.turn_off
                 target:
                   entity_id: switch.inverter_battery_grid_charging
@@ -192,9 +219,7 @@ script:
                   entity_id: number.inverter_battery_max_discharging_current
                 data:
                   value: 240
-              - action: switch.turn_off
-                target:
-                  entity_id: switch.inverter_battery_grid_charging
+              # Grid charging left to the external supplier EMS outside SELL (see SELL branch note).
               - action: switch.turn_on
                 target:
                   entity_id: switch.inverter_export_surplus
@@ -211,13 +236,16 @@ script:
                   entity_id: number.inverter_battery_max_discharging_current
                 data:
                   value: 240
-              - action: switch.turn_off
-                target:
-                  entity_id: switch.inverter_battery_grid_charging
+              # Grid charging left to the external supplier EMS outside SELL (see SELL branch note).
               - action: switch.turn_off
                 target:
                   entity_id: switch.inverter_export_surplus
           # --- GRID_USE ---
+          # PV cap at 400W (floor): Deye firmware quirk treats lower values as
+          # "no cap". The cap gets cleared by an external writer (the external
+          # supplier EMS or firmware watchdog), so ems_pv_cap_refresh automation
+          # re-writes it every 30s while in DUMP/GRID_USE to keep firmware
+          # honoring the limit.
           - conditions: "{{ state == 'GRID_USE' }}"
             sequence:
               - action: number.set_value
@@ -271,13 +299,17 @@ automation:
   - id: ems_price_evaluator
     alias: "Energy - EMS - Price Evaluator"
     description: "Evaluate prices on change, manage SLOW/FAST/INSTANT timers"
+    # Trigger on the derived sensor, not the raw prices. ems_ideal_state and its
+    # spread attribute are recomputed from prices/SOC/PV/etc; a state trigger on
+    # this entity fires on both state (ideal) and attribute (spread) changes, so
+    # every input that matters still wakes the evaluator. Crucially, the action
+    # then reads the value of the entity that just committed — no stale template
+    # read one tick behind, which previously let real spreads start no timer.
+    # ems_enabled is the only input NOT folded into ems_ideal_state, so it stays
+    # an explicit trigger.
     trigger:
       - platform: state
-        entity_id:
-          - sensor.tennet_imbalance_sell_price
-          - sensor.tennet_imbalance_buy_price
-      - platform: state
-        entity_id: sensor.inverter_battery
+        entity_id: sensor.ems_ideal_state
       - platform: state
         entity_id: input_boolean.ems_enabled
     condition:
@@ -288,7 +320,7 @@ automation:
       - variables:
           ideal: "{{ states('sensor.ems_ideal_state') }}"
           current: "{{ states('input_select.ems_state') }}"
-          spread_ct: "{{ states('sensor.ems_transition_spread') | float(0) }}"
+          spread_ct: "{{ state_attr('sensor.ems_ideal_state', 'spread') | float(0) }}"
           hysteresis: "{{ states('input_number.transition_hysteresis') | float(2) }}"
           fast_spread: "{{ states('input_number.transition_fast_spread') | float(4) }}"
           instant_spread: "{{ states('input_number.transition_instant_spread') | float(15) }}"
@@ -392,6 +424,42 @@ automation:
         data:
           state: "{{ states('sensor.ems_ideal_state') }}"
 
+  # --- Manual Override: apply levers when a state is picked from the UI ---
+  # input_select.ems_state is only the status tracker. The EMS always
+  # transitions via script.ems_apply_state, which actuates the inverter levers
+  # (export switch, IO mode, PV cap, discharge current). Selecting the dropdown
+  # directly sets the tracker but runs nothing, so the levers were left stale
+  # (e.g. export stayed ON in SELF_CONSUME). This re-runs the apply script for
+  # user-initiated selections so the dropdown works as a manual override.
+  # The EMS keeps evaluating prices afterward and transitions away normally.
+  #
+  # Loop-safe: gated on context.user_id, which is set for UI/Developer-Tools
+  # changes but None for the EMS's own automation/timer-driven writes. The
+  # script's first action re-selects the same option (no state change), so the
+  # manual trigger never re-fires itself.
+  - id: ems_manual_override
+    alias: "Energy - EMS - Manual State Override"
+    description: "Apply control levers when ems_state is set manually from the UI"
+    trigger:
+      - platform: state
+        entity_id: input_select.ems_state
+    condition:
+      - condition: template
+        value_template: "{{ trigger.to_state.context.user_id is not none }}"
+      - condition: state
+        entity_id: input_boolean.ems_enabled
+        state: "on"
+    action:
+      - action: script.ems_apply_state
+        data:
+          state: "{{ trigger.to_state.state }}"
+      - action: system_log.write
+        data:
+          message: >
+            EMS: manual override → {{ trigger.to_state.state }} (applied via UI selection)
+          level: info
+          logger: homeassistant.energy.ems
+
   # --- SOC Fallback: immediate DUMP exit when battery low ---
   - id: ems_soc_fallback
     alias: "Energy - EMS - SOC Fallback"
@@ -432,6 +500,27 @@ automation:
       - action: script.ems_apply_state
         data:
           state: "{{ states('sensor.ems_ideal_state') }}"
+
+  # --- PV Cap Refresh: keep number.inverter_pv_power=400 during DUMP/GRID_USE ---
+  # The external supplier EMS (or firmware watchdog) periodically clears the PV
+  # limit register, which lets MPPT run free under load pressure. This re-writes
+  # every 30s to keep the cap honored — costs 1 Modbus write per half-minute.
+  - id: ems_pv_cap_refresh
+    alias: "Energy - EMS - PV Cap Refresh"
+    description: "Re-assert PV limit in DUMP/GRID_USE against external register clears"
+    mode: single
+    trigger:
+      - platform: time_pattern
+        seconds: "/30"
+    condition:
+      - condition: template
+        value_template: "{{ states('input_select.ems_state') in ['DUMP', 'GRID_USE'] }}"
+    action:
+      - action: number.set_value
+        target:
+          entity_id: number.inverter_pv_power
+        data:
+          value: 400
 
 sensor:
   - platform: statistics

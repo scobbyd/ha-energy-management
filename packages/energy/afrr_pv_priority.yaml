@@ -1,0 +1,176 @@
+# Energy Package - aFRR PV Priority
+# Proactively limits battery discharge current during aFRR discharge so the
+# ~12 kW AC ceiling isn't saturated and rooftop PV is not curtailed to 0 W.
+
+# Template binary sensor — drives the aFRR Restore automation's templated
+# `for:` duration. Switching to a state trigger lets the restore delay
+# itself be tunable from the UI.
+template:
+  - binary_sensor:
+      - name: "aFRR PV Below Threshold"
+        unique_id: afrr_pv_below_threshold
+        icon: mdi:weather-sunny-off
+        state: >
+          {{ states('sensor.inverter_pv_power') | float(0)
+             < states('input_number.afrr_pv_threshold') | float(500) }}
+        availability: >
+          {{ states('sensor.inverter_pv_power') not in ['unavailable', 'unknown'] }}
+
+automation:
+  # Export protection is handled by the EMS state machine (energy_state_machine.yaml).
+
+  # =========================================================================
+  # aFRR PV Priority - Proactive Discharge Current Limiting
+  # =========================================================================
+  # The Deye Sun 12K has a ~12kW AC output ceiling. When the EMS activates
+  # aFRR discharge, battery at 240A (~12.9kW DC) saturates AC output,
+  # forcing MPPT to curtail to 0W. This wastes free solar energy.
+  #
+  # Fix: proactively limit battery_max_discharging_current so that
+  # battery + PV together target 11800W — safely under the 12kW ceiling
+  # with 200W margin for fluctuations. The limit is ALREADY in place
+  # when aFRR activates, so:
+  #   - No inverter-cloud polling delay (~90s) matters
+  #   - No chicken-and-egg (PV never curtails, MPPT stays active)
+  #   - No MPPT recovery ramp needed
+  #
+  # Why discharging_current and not program_1_power:
+  #   program_1_power is a TOD scheduling parameter — the inverter ignores
+  #   it during live Export First operation (verified: battery pushed 11.8kW
+  #   with program_1_power set to 7604W). battery_max_discharging_current
+  #   is a hard hardware limit that applies in all modes.
+  #
+  # EMS behavior: does NOT write battery_max_discharging_current during
+  #   aFRR events (only written at HA restart). The EMS controls aFRR via
+  #   work_mode and export_surplus_power only.
+  #
+  # Headroom formula: battery_target = 11800 - min(PV * 1.05, PV + 200)
+  #   Over-estimates PV to ensure battery + actual PV stays under 11800W.
+  #   - At high PV (>4kW): 5% over-estimate handles upward fluctuations
+  #   - At low PV (<4kW): flat +200W over-estimate is sufficient
+  #   An AC-coupled microinverter (~1.7kW via AC input) does not count
+  #   against the 12kW DC-to-AC ceiling.
+  #
+  # Current conversion: target_amps = battery_target / battery_voltage
+  #   Clamped to [40, 240] A. 5A deadband prevents excessive EEPROM writes.
+  #
+  # Activation threshold: PV > 500W. Below that, savings are negligible
+  #   and full 240A discharge is preferred for maximum aFRR revenue.
+  #
+  # During Export First (aFRR): prestage is frozen to prevent a positive
+  #   feedback loop where lower PV → higher current → even lower PV.
+  #   The pre-staged value handles the typical case; brief cloud events
+  #   during aFRR (~5-15 min) have negligible revenue impact.
+  # =========================================================================
+
+  # Pre-stage discharge current based on current PV.
+  # Tunables live in input_number.afrr_* helpers (see energy_helpers.yaml).
+  # Master gates: input_boolean.ems_enabled, input_boolean.afrr_pv_priority_enabled.
+  - id: afrr_pv_priority_prestage
+    alias: "aFRR PV Priority - Pre-stage Discharge Limit"
+    description: >
+      Every 60 seconds during normal operation, sets
+      battery_max_discharging_current so battery + PV targets the
+      AC ceiling tunable (default 11800 W). Only active when PV is
+      above the activation threshold and work_mode is Zero Export To CT.
+    trigger:
+      - platform: time_pattern
+        minutes: "/1"
+    condition:
+      - condition: state
+        entity_id: input_boolean.ems_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.afrr_pv_priority_enabled
+        state: "on"
+      - condition: state
+        entity_id: select.inverter_work_mode
+        state: "Zero Export To CT"
+      - condition: template
+        value_template: >
+          {{ states('sensor.inverter_pv_power') | float(0)
+             > states('input_number.afrr_pv_threshold') | float(500) }}
+      # Only adjust discharge current in NORMAL/SELL/SELF_CONSUME — in GRID_USE/DUMP the EMS controls it
+      - condition: template
+        value_template: "{{ states('input_select.ems_state') in ['NORMAL', 'SELL', 'SELF_CONSUME'] }}"
+    action:
+      - variables:
+          pv: "{{ states('sensor.inverter_pv_power') | int(0) }}"
+          voltage: "{{ states('sensor.inverter_battery_voltage') | float(53.0) }}"
+          ac_ceiling: "{{ states('input_number.afrr_ac_ceiling') | float(11800) }}"
+          pad_pct: "{{ states('input_number.afrr_pv_padding_pct') | float(5) }}"
+          pad_flat: "{{ states('input_number.afrr_pv_padding_flat') | float(200) }}"
+          floor_w: "{{ states('input_number.afrr_target_floor_w') | float(2000) }}"
+          min_a: "{{ states('input_number.afrr_min_amps') | float(40) }}"
+          max_a: "{{ states('input_number.afrr_max_amps') | float(240) }}"
+          deadband: "{{ states('input_number.afrr_step_deadband') | float(5) }}"
+          pv_padded: "{{ [pv * (1 + pad_pct / 100), pv + pad_flat] | min | int }}"
+          target_power: "{{ [[ac_ceiling - pv_padded, ac_ceiling] | min, floor_w] | max }}"
+          target_amps: "{{ [[target_power / voltage, max_a] | min, min_a] | max | int }}"
+          current_amps: "{{ states('number.inverter_battery_max_discharging_current') | int(240) }}"
+      - if:
+          - condition: template
+            value_template: "{{ (target_amps - current_amps) | abs > deadband }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: number.inverter_battery_max_discharging_current
+            data:
+              value: "{{ target_amps }}"
+          - action: system_log.write
+            data:
+              message: >
+                aFRR PV priority: prestage PV={{ pv }}W, padded={{ pv_padded }}W,
+                bat_target={{ target_power | int }}W, {{ target_amps }}A (was {{ current_amps }}A),
+                Vbat={{ voltage }}V
+              level: info
+              logger: energy.afrr_pv_priority
+    mode: single
+
+  # Restore full max-amps discharge ceiling when PV stays low.
+  # Triggers on the binary sensor flipping `on` for the user-configured
+  # restore delay; that lets the delay itself be a UI tunable.
+  - id: afrr_pv_priority_restore
+    alias: "aFRR PV Priority - Restore Full Discharge"
+    description: >
+      Restores battery_max_discharging_current to the max-amps clamp
+      (default 240 A) when PV stays below the activation threshold for
+      the configured restore delay, so aFRR events use full battery
+      capacity. Also restores on HA restart.
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.afrr_pv_below_threshold
+        to: "on"
+        for:
+          minutes: "{{ states('input_number.afrr_restore_delay') | float(2) }}"
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: input_boolean.ems_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.afrr_pv_priority_enabled
+        state: "on"
+      - condition: template
+        value_template: >
+          {{ states('number.inverter_battery_max_discharging_current') | int(240)
+             != states('input_number.afrr_max_amps') | int(240) }}
+      # Only adjust discharge current in NORMAL/SELL/SELF_CONSUME — in GRID_USE/DUMP the EMS controls it
+      - condition: template
+        value_template: "{{ states('input_select.ems_state') in ['NORMAL', 'SELL', 'SELF_CONSUME'] }}"
+    action:
+      - variables:
+          max_a: "{{ states('input_number.afrr_max_amps') | int(240) }}"
+      - action: number.set_value
+        target:
+          entity_id: number.inverter_battery_max_discharging_current
+        data:
+          value: "{{ max_a }}"
+      - action: system_log.write
+        data:
+          message: >
+            aFRR PV priority: Restored max discharge to {{ max_a }}A (PV below threshold)
+          level: info
+          logger: energy.afrr_pv_priority
+    mode: single
